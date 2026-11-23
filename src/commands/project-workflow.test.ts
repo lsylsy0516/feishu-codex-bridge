@@ -342,17 +342,16 @@ describe('Codex project command workflow', () => {
     ctx.msg.chatId = 'chat-project';
     ctx.msg.chatType = 'group';
     ctx.fromCardAction = true;
+    const listSessions = vi.fn().mockRejectedValue(new Error('Codex app-server is unavailable'));
     ctx.agent = {
       ...ctx.agent,
       createSession: vi.fn(),
-      listSessions: vi.fn().mockResolvedValue([{
-        threadId: 'thread-restored', name: '旧会话', preview: '上次的对话', cwd: project.cwd,
-        status: 'idle', updatedAt: 2,
-      }]),
+      listSessions,
     };
 
     await runCommandHandler('session', 'open thread-restored', ctx);
 
+    expect(listSessions).not.toHaveBeenCalled();
     expect(JSON.stringify(updateCard.mock.calls)).toContain('session.reopen');
   });
 
@@ -377,13 +376,11 @@ describe('Codex project command workflow', () => {
     ctx.msg.chatId = 'chat-project';
     ctx.msg.chatType = 'group';
     ctx.fromCardAction = true;
+    const listSessions = vi.fn().mockRejectedValue(new Error('Codex app-server is unavailable'));
     ctx.agent = {
       ...ctx.agent,
       createSession: vi.fn(),
-      listSessions: vi.fn().mockResolvedValue([{
-        threadId: 'thread-restored', name: '旧会话', preview: '上次的对话', cwd: project.cwd,
-        status: 'idle', updatedAt: 2,
-      }]),
+      listSessions,
       readSessionHistory,
     };
 
@@ -394,6 +391,7 @@ describe('Codex project command workflow', () => {
       codexThreadId: 'thread-restored',
       projectKey: project.projectKey,
     });
+    expect(listSessions).not.toHaveBeenCalled();
     expect(readSessionHistory).toHaveBeenCalledWith('thread-restored', 0);
     expect(send).toHaveBeenCalledWith(
       'chat-project',

@@ -613,8 +613,22 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
   }
   const project = ctx.projectBindings.findProjectByChat(ctx.msg.chatId);
   if (!project) return reply(ctx, '当前群还没有绑定项目，请先从“选择项目”开始。');
-  await commandProgress(ctx, '正在打开会话并创建话题，请稍候。');
   const action = args.trim();
+  if (action.startsWith('open ')) {
+    const requestedThreadId = action.slice(5).trim();
+    const existing = ctx.projectBindings.findTopicByThread(requestedThreadId);
+    if (existing && existing.projectKey !== project.projectKey) {
+      return reply(ctx, '这个会话属于其他项目，不能在当前项目重新绑定。');
+    }
+    if (existing) {
+      await commandFeedback(ctx, '会话已经打开', '这个会话已经绑定了一个话题。如果原话题已被删除，可在新话题重新打开；Codex 历史不会被删除。', [
+        { text: '在新话题重新打开', value: { cmd: 'session.reopen', arg: requestedThreadId }, style: 'primary' },
+        { text: '查看会话', value: { cmd: 'sessions' } },
+      ]);
+      return;
+    }
+  }
+  await commandProgress(ctx, '正在打开会话并创建话题，请稍候。');
   let threadId: string;
   let title: string;
   let restoreHistory = false;
@@ -631,14 +645,18 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     restoreHistory = true;
   } else if (action.startsWith('reopen ')) {
     threadId = action.slice(7).trim();
-    const found = await findProjectSession(ctx.agent, project.cwd, threadId);
-    if (!found) return reply(ctx, '没有找到这个会话，请刷新会话列表。');
-    title = found.name ?? found.preview.slice(0, 40) ?? '未命名会话';
-    restoreHistory = true;
     bindingToReplace = ctx.projectBindings.findTopicByThread(threadId);
     if (bindingToReplace && bindingToReplace.projectKey !== project.projectKey) {
       return reply(ctx, '这个会话属于其他项目，不能在当前项目重新绑定。');
     }
+    if (bindingToReplace) {
+      title = '恢复的会话';
+    } else {
+      const found = await findProjectSession(ctx.agent, project.cwd, threadId);
+      if (!found) return reply(ctx, '没有找到这个会话，请刷新会话列表。');
+      title = found.name ?? found.preview.slice(0, 40) ?? '未命名会话';
+    }
+    restoreHistory = true;
   } else if (action === 'history' || action.startsWith('history ')) {
     const [explicitThreadId, rawOffset] = action === 'history'
       ? []

@@ -17,6 +17,15 @@ function button(spec: ButtonSpec): object {
   };
 }
 
+function cardKitButton(spec: ButtonSpec): object {
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: spec.text },
+    type: spec.style ?? 'default',
+    behaviors: [{ type: 'callback', value: spec.value }],
+  };
+}
+
 function divMd(content: string): object {
   return { tag: 'div', text: { tag: 'lark_md', content } };
 }
@@ -234,7 +243,7 @@ export function sessionHistoryCard(
     HR,
     { tag: 'markdown', content: activity },
   ];
-  if (historyActions.length > 0) elements.push(HR, actions(historyActions));
+  if (historyActions.length > 0) elements.push(HR, ...historyActions.map(cardKitButton));
   return {
     schema: '2.0',
     config: { update_multi: true, summary: { content: '历史上下文' } },

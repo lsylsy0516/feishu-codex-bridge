@@ -328,6 +328,80 @@ describe('Codex project command workflow', () => {
     );
   });
 
+  it('offers to reopen a session whose previous Feishu topic is still locally bound', async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: 'feedback' });
+    const updateCard = vi.fn().mockResolvedValue(undefined);
+    const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+    bindings.registerProjects([project]);
+    await bindings.bindProject(project.projectKey, 'chat-project');
+    await bindings.bindTopic({
+      chatId: 'chat-project', topicId: 'topic-old', projectKey: project.projectKey,
+      codexThreadId: 'thread-restored', createdBy: 'user-1', updatedAt: 1,
+    });
+    const ctx = context({ send, updateCard }, bindings);
+    ctx.msg.chatId = 'chat-project';
+    ctx.msg.chatType = 'group';
+    ctx.fromCardAction = true;
+    ctx.agent = {
+      ...ctx.agent,
+      createSession: vi.fn(),
+      listSessions: vi.fn().mockResolvedValue([{
+        threadId: 'thread-restored', name: '旧会话', preview: '上次的对话', cwd: project.cwd,
+        status: 'idle', updatedAt: 2,
+      }]),
+    };
+
+    await runCommandHandler('session', 'open thread-restored', ctx);
+
+    expect(JSON.stringify(updateCard.mock.calls)).toContain('session.reopen');
+  });
+
+  it('rebinds a restored session to a new topic and posts its history', async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ messageId: 'root-reopened' })
+      .mockResolvedValue({ messageId: 'history-card' });
+    const updateCard = vi.fn().mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({ data: { items: [{ thread_id: 'topic-reopened' }] } });
+    const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+    bindings.registerProjects([project]);
+    await bindings.bindProject(project.projectKey, 'chat-project');
+    await bindings.bindTopic({
+      chatId: 'chat-project', topicId: 'topic-deleted', projectKey: project.projectKey,
+      codexThreadId: 'thread-restored', createdBy: 'user-1', updatedAt: 1,
+    });
+    const readSessionHistory = vi.fn().mockResolvedValue({
+      activities: [{ kind: '用户', text: '旧问题' }, { kind: '助手', text: '旧回答' }],
+      total: 2,
+    });
+    const ctx = context({ send, updateCard, rawClient: { im: { v1: { message: { get } } } } }, bindings);
+    ctx.msg.chatId = 'chat-project';
+    ctx.msg.chatType = 'group';
+    ctx.fromCardAction = true;
+    ctx.agent = {
+      ...ctx.agent,
+      createSession: vi.fn(),
+      listSessions: vi.fn().mockResolvedValue([{
+        threadId: 'thread-restored', name: '旧会话', preview: '上次的对话', cwd: project.cwd,
+        status: 'idle', updatedAt: 2,
+      }]),
+      readSessionHistory,
+    };
+
+    await runCommandHandler('session', 'reopen thread-restored', ctx);
+
+    expect(bindings.findTopic('chat-project', 'topic-deleted')).toBeUndefined();
+    expect(bindings.findTopic('chat-project', 'topic-reopened')).toMatchObject({
+      codexThreadId: 'thread-restored',
+      projectKey: project.projectKey,
+    });
+    expect(readSessionHistory).toHaveBeenCalledWith('thread-restored', 0);
+    expect(send).toHaveBeenCalledWith(
+      'chat-project',
+      { card: expect.objectContaining({ schema: '2.0' }) },
+      { replyTo: 'root-reopened', replyInThread: true },
+    );
+  });
+
   it('shows history on demand inside an existing session topic', async () => {
     const send = vi.fn().mockResolvedValue({ messageId: 'history-card' });
     const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));

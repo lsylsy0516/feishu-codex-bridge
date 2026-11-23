@@ -99,14 +99,17 @@ describe('project-first Feishu cards', () => {
   });
 
   it('renders paged history with a load-older action', () => {
-    const card = text(sessionHistoryCard('示例项目', 'thread-1', {
+    const historyCard = sessionHistoryCard('示例项目', 'thread-1', {
       activities: [
         { kind: '用户', text: '请继续修复' },
         { kind: '助手', text: '**关键结论**\n\n`rod-body` 已完成\n\n## 下一步' },
       ],
       nextOffset: 10,
       total: 22,
-    }, 0));
+    }, 0) as { schema?: string; body?: { elements?: Array<{ tag?: string }> } };
+    const card = text(historyCard);
+    expect(historyCard.schema).toBe('2.0');
+    expect(historyCard.body?.elements).not.toContainEqual(expect.objectContaining({ tag: 'action' }));
     expect(card).toContain('历史上下文');
     expect(card).toContain('"schema":"2.0"');
     expect(card).toContain('"tag":"markdown"');

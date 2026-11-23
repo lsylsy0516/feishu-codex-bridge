@@ -99,13 +99,22 @@ describe('project-first Feishu cards', () => {
 
   it('renders paged history with a load-older action', () => {
     const card = text(sessionHistoryCard('示例项目', 'thread-1', {
-      activities: [{ kind: '用户', text: '请继续修复' }, { kind: '助手', text: '已完成第一步' }],
+      activities: [
+        { kind: '用户', text: '请继续修复' },
+        { kind: '助手', text: '**关键结论**\n\n`rod-body` 已完成\n\n## 下一步' },
+      ],
       nextOffset: 10,
       total: 22,
     }, 0));
     expect(card).toContain('历史上下文');
+    expect(card).toContain('"schema":"2.0"');
+    expect(card).toContain('"tag":"markdown"');
     expect(card).toContain('Codex 已保留完整上下文');
     expect(card).toContain('请继续修复');
+    expect(card).toContain('**关键结论**');
+    expect(card).toContain('`rod-body`');
+    expect(card).toContain('## 下一步');
+    expect(card).not.toContain('\\*\\*关键结论\\*\\*');
     expect(card).toContain('加载更早记录');
     expect(card).toContain('thread-1 10');
     expect(text(sessionHistoryCard('示例项目', 'thread-empty', { activities: [], total: 0 }, 0)))

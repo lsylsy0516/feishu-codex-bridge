@@ -320,7 +320,10 @@ describe('Codex project command workflow', () => {
     expect(readSessionHistory).toHaveBeenCalledWith('thread-restored', 0);
     expect(send).toHaveBeenCalledWith(
       'chat-project',
-      { card: expect.objectContaining({ header: expect.objectContaining({ title: expect.objectContaining({ content: '历史上下文' }) }) }) },
+      { card: expect.objectContaining({
+        schema: '2.0',
+        config: expect.objectContaining({ summary: { content: '历史上下文' } }),
+      }) },
       { replyTo: 'root-restored', replyInThread: true },
     );
   });

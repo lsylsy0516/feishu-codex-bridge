@@ -213,7 +213,7 @@ export function sessionHistoryCard(
   offset = 0,
 ): object {
   const activity = page.activities.length > 0
-    ? page.activities.map((item) => `**${escapeMd(item.kind)}**\n${escapeMd(item.text.slice(0, 360))}`).join('\n\n')
+    ? page.activities.map((item) => `**${escapeMd(item.kind)}**\n${truncateMarkdown(item.text, 1_000)}`).join('\n\n')
     : '这个会话暂无可展示的文本历史。';
   const position = page.total > 0
     ? offset > 0 ? `更早的 ${page.activities.length} 条（共 ${page.total} 条）` : `最近 ${page.activities.length} 条（共 ${page.total} 条）`
@@ -230,12 +230,27 @@ export function sessionHistoryCard(
     historyActions.push({ text: '返回最近记录', value: { cmd: 'session.history', arg: `${threadId} 0` } });
   }
   const elements: object[] = [
-    divMd(`项目：**${escapeMd(projectName)}**\n${position}\n\nCodex 已保留完整上下文，以下只是飞书中的历史预览。`),
+    { tag: 'markdown', content: `# 历史上下文\n项目：**${escapeMd(projectName)}**\n${position}\n\nCodex 已保留完整上下文，以下只是飞书中的历史预览。` },
     HR,
-    divMd(activity),
+    { tag: 'markdown', content: activity },
   ];
   if (historyActions.length > 0) elements.push(HR, actions(historyActions));
-  return shell('历史上下文', elements);
+  return {
+    schema: '2.0',
+    config: { update_multi: true, summary: { content: '历史上下文' } },
+    body: { elements },
+  };
+}
+
+function truncateMarkdown(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  const candidate = text.slice(0, maxLength);
+  const lastLineBreak = candidate.lastIndexOf('\n');
+  const truncated = lastLineBreak >= Math.floor(maxLength * 0.6)
+    ? candidate.slice(0, lastLineBreak)
+    : candidate;
+  const openCodeFence = (truncated.match(/```/g)?.length ?? 0) % 2 === 1;
+  return `${truncated}\n\n…${openCodeFence ? '\n```' : ''}`;
 }
 
 export function sessionProgressCard(projectName: string, detail: SessionDetail, autoSync = false): object {

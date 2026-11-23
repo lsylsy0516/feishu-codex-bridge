@@ -30,7 +30,7 @@ export class CodexAppServerClient {
   private readonly notifications = new Set<NotificationHandler>();
   private readonly serverRequests = new Set<ServerRequestHandler>();
 
-  constructor(binary = 'codex') {
+  constructor(binary = 'codex', private readonly onUnexpectedExit?: (error: Error) => void) {
     this.binary = binary;
   }
 
@@ -87,17 +87,16 @@ export class CodexAppServerClient {
     }
     const child = this.child;
     this.child = undefined;
-    if (child && child.exitCode === null) {
-      child.kill('SIGTERM');
+    if (child?.pid && child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
-          if (child.exitCode === null) child.kill('SIGKILL');
-          resolve();
+          child.kill('SIGKILL');
         }, 1_000);
         child.once('exit', () => {
           clearTimeout(timer);
           resolve();
         });
+        child.kill('SIGTERM');
       });
     }
   }
@@ -126,14 +125,20 @@ export class CodexAppServerClient {
       const text = chunk.toString('utf8').trim();
       if (text) log.warn('codex', 'stderr', { text: text.slice(0, 500) });
     });
-    child.once('exit', (code, signal) => {
+    let spawnError: Error | undefined;
+    child.once('error', (err) => { spawnError = err; });
+    child.once('close', (code, signal) => {
+      if (this.child !== child) return;
+      this.child = undefined;
       this.initialized = false;
+      const error = spawnError ?? new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`);
       log.info('codex', 'app-server-exit', { code, signal });
       for (const [id, entry] of this.pending) {
         clearTimeout(entry.timer);
-        entry.reject(new Error(`Codex app-server exited (${code ?? signal ?? 'unknown'})`));
+        entry.reject(error);
         this.pending.delete(id);
       }
+      this.onUnexpectedExit?.(error);
     });
     await this.requestBeforeInitialized('initialize', {
       clientInfo: { name: 'feishu_codex_bridge', title: 'Feishu Codex Bridge', version: '0.1.0' },

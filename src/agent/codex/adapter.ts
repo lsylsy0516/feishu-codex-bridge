@@ -62,10 +62,11 @@ export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
   readonly displayName = 'Codex';
   private readonly client: CodexAppServerClient;
+  private readonly runs = new Set<() => Promise<void>>();
   private defaultModel?: string;
   private defaultModelPromise?: Promise<string | undefined>;
 
-  constructor(opts: CodexAdapterOptions = {}) {
+  constructor(private readonly opts: CodexAdapterOptions = {}) {
     this.client = new CodexAppServerClient(opts.binary);
   }
 
@@ -74,7 +75,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async close(): Promise<void> {
-    await this.client.close();
+    await Promise.all([this.client.close(), ...Array.from(this.runs, (stop) => stop())]);
   }
 
   /**
@@ -161,7 +162,7 @@ export class CodexAdapter implements AgentAdapter {
 
   async readSessionHistory(threadId: string, offset = 0): Promise<SessionHistoryPage> {
     const thread = await this.readThread(threadId);
-    const activities = flattenThreadActivity(thread);
+    const activities = flattenThreadActivity(thread).filter((item) => item.kind === '助手');
     const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
     const end = Math.max(0, activities.length - safeOffset);
     const start = Math.max(0, end - FEISHU_HISTORY_PAGE_SIZE);
@@ -181,7 +182,7 @@ export class CodexAdapter implements AgentAdapter {
     } catch (err) {
       if (!isThreadNotLoadedError(err)) throw err;
       log.info('codex', 'read-session-resume-fallback', { threadId });
-      response = await this.client.request('thread/resume', { threadId });
+      response = await this.withTemporaryClient((client) => client.request('thread/resume', { threadId }));
     }
     if (!response.thread) throw new Error('Codex app-server did not return the session');
     return response.thread;
@@ -212,7 +213,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async createSession(cwd: string): Promise<SessionSummary> {
-    const response = await this.startThread(cwd);
+    const response = await this.withTemporaryClient((client) => this.startThread(client, cwd));
     const thread = response.thread;
     const threadId = String(thread?.id ?? '');
     if (!threadId) throw new Error('Codex app-server did not return a new session id');
@@ -238,11 +239,11 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async forkSession(threadId: string, cwd?: string): Promise<SessionSummary> {
-    const response = await this.client.request<ThreadResponse>('thread/fork', {
+    const response = await this.withTemporaryClient((client) => client.request<ThreadResponse>('thread/fork', {
       threadId,
       ...(cwd ? { cwd } : {}),
       persistExtendedHistory: true,
-    });
+    }));
     const thread = response.thread;
     const session = thread ? mapThread(thread, cwd ?? '') : undefined;
     if (!session) throw new Error('Codex app-server did not return the forked session');
@@ -261,14 +262,19 @@ export class CodexAdapter implements AgentAdapter {
     });
   }
 
-  async renameSession(threadId: string, title: string): Promise<void> {
-    await this.setThreadName(threadId, title);
+  private async withTemporaryClient<T>(request: (client: CodexAppServerClient) => Promise<T>): Promise<T> {
+    const client = new CodexAppServerClient(this.opts.binary);
+    try {
+      return await request(client);
+    } finally {
+      await client.close();
+    }
   }
 
-  private async startThread(cwd?: string): Promise<ThreadResponse> {
-    const base = { ...(cwd ? { cwd } : {}) };
+  private async startThread(client: CodexAppServerClient, cwd?: string, model?: string): Promise<ThreadResponse> {
+    const base = { ...(cwd ? { cwd } : {}), ...(model ? { model } : {}) };
     try {
-      return await this.client.request<ThreadResponse>('thread/start', {
+      return await client.request<ThreadResponse>('thread/start', {
         ...base,
         serviceName: BRIDGE_SERVICE_NAME,
         threadSource: 'user',
@@ -278,30 +284,17 @@ export class CodexAdapter implements AgentAdapter {
       log.warn('codex', 'desktop-metadata-unsupported', {
         error: err instanceof Error ? err.message : String(err),
       });
-      return this.client.request<ThreadResponse>('thread/start', base);
-    }
-  }
-
-  private async setThreadName(threadId: string | undefined, title: string | undefined): Promise<void> {
-    const name = title?.replace(/\s+/g, ' ').trim();
-    if (!threadId || !name) return;
-    try {
-      await this.client.request('thread/name/set', { threadId, name });
-    } catch (err) {
-      // Naming is a presentation enhancement. Never fail a user turn when an
-      // older app-server does not expose thread/name/set.
-      log.warn('codex', 'thread-name-unavailable', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      return client.request<ThreadResponse>('thread/start', base);
     }
   }
 
   private async requestTurn<T>(
+    client: CodexAppServerClient,
     method: 'turn/start' | 'turn/steer',
     params: Record<string, unknown> & { additionalContext?: AgentAdditionalContext },
   ): Promise<T> {
     try {
-      return await this.client.request<T>(method, params);
+      return await client.request<T>(method, params);
     } catch (err) {
       if (!params.additionalContext || !isAdditionalContextCompatibilityError(err)) throw err;
       log.warn('codex', 'additional-context-unsupported', {
@@ -309,12 +302,17 @@ export class CodexAdapter implements AgentAdapter {
         error: err instanceof Error ? err.message : String(err),
       });
       const { additionalContext: _ignored, ...fallback } = params;
-      return this.client.request<T>(method, fallback);
+      return client.request<T>(method, fallback);
     }
   }
 
   run(opts: AgentRunOptions): AgentRun {
-    const client = this.client;
+    // A loaded thread holds a writer lock for the life of its app-server.
+    const client = new CodexAppServerClient(this.opts.binary, (error) => {
+      if (settled) return;
+      queue.push({ type: 'error', message: error.message });
+      finish();
+    });
     const requestTurn = this.requestTurn.bind(this);
     const queue = new AsyncQueue<AgentEvent>();
     const pendingUi = new Map<string, PendingUi>();
@@ -329,14 +327,30 @@ export class CodexAdapter implements AgentAdapter {
     let exitResolve!: () => void;
     const exited = new Promise<void>((resolve) => { exitResolve = resolve; });
 
-    const finish = (): void => {
+    const finish = (interrupt = false): void => {
       if (settled) return;
       settled = true;
       unsubscribe?.();
       unsubscribeRequests?.();
       queue.close();
-      exitResolve();
+      const interruptTurn = interrupt && threadId && turnId
+        ? Promise.race([
+          client.request('turn/interrupt', { threadId, turnId }).catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 500)),
+        ])
+        : Promise.resolve();
+      void interruptTurn.then(() => client.close()).finally(() => {
+        this.runs.delete(stop);
+        exitResolve();
+      });
     };
+
+    const stop = async (): Promise<void> => {
+      stopped = true;
+      finish(true);
+      await exited;
+    };
+    this.runs.add(stop);
 
     const isHistoricalCompatibilityFailure = (message: string): boolean => {
       if (!opts.sessionId || replacementStarted) return false;
@@ -349,23 +363,24 @@ export class CodexAdapter implements AgentAdapter {
       queue.push({ type: 'ui_notice', message: '原 Codex 会话使用了当前设备不兼容的配置，已自动新建会话并重试。', level: 'warning' });
       void (async () => {
         try {
-          const replacement = await this.startThread(opts.cwd);
+          const replacement = await this.startThread(client, opts.cwd, effectiveModel);
           threadId = replacement.thread?.id ?? replacement.id;
           if (!threadId) throw new Error('Codex app-server did not return a replacement thread id');
           turnId = undefined;
-          await this.setThreadName(threadId, opts.title);
           queue.push({ type: 'system', sessionId: threadId, cwd: opts.cwd });
-          const turn = await requestTurn<{ id?: string; turn?: { id?: string } }>('turn/start', {
+          if (settled) return;
+          const turn = await requestTurn<{ id?: string; turn?: { id?: string } }>(client, 'turn/start', {
             threadId,
             input: [{ type: 'text', text: opts.prompt, text_elements: [] }],
             ...(opts.clientUserMessageId ? { clientUserMessageId: opts.clientUserMessageId } : {}),
             ...(opts.cwd ? { cwd: opts.cwd } : {}),
+            ...(effectiveModel ? { model: effectiveModel } : {}),
             ...(opts.additionalContext ? { additionalContext: opts.additionalContext } : {}),
           });
           turnId = turn.turn?.id ?? turn.id;
         } catch (err) {
           if (!stopped) queue.push({ type: 'error', message: err instanceof Error ? err.message : String(err) });
-          finish();
+          finish(true);
         }
       })();
       return true;
@@ -376,8 +391,9 @@ export class CodexAdapter implements AgentAdapter {
       if (message.method === 'error') {
         const error = params.error as { message?: string } | undefined;
         const errorMessage = error?.message ?? 'Codex app-server 返回错误';
-        if (!replaceHistoricalSession(errorMessage) && (!params.threadId || params.threadId === threadId)) {
+        if ((!params.threadId || params.threadId === threadId) && !replaceHistoricalSession(errorMessage)) {
           queue.push({ type: 'error', message: errorMessage });
+          finish(true);
         }
         return;
       }
@@ -467,8 +483,8 @@ export class CodexAdapter implements AgentAdapter {
         const turn = params.turn as { status?: string; error?: { message?: string } | null } | undefined;
         if (turn?.status === 'failed') {
           const errorMessage = turn.error?.message ?? 'Codex 执行失败';
-          if (!replaceHistoricalSession(errorMessage)) queue.push({ type: 'error', message: errorMessage });
-          if (replacementStarted) return;
+          if (replaceHistoricalSession(errorMessage)) return;
+          queue.push({ type: 'error', message: errorMessage });
         }
         else if (!stopped) queue.push({ type: 'done', sessionId: threadId });
         finish();
@@ -481,6 +497,7 @@ export class CodexAdapter implements AgentAdapter {
       const supported = new Set(['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'item/tool/requestUserInput']);
       if (!supported.has(message.method)) {
         queue.push({ type: 'error', message: `Codex 发出了暂不支持的交互请求：${message.method}` });
+        finish(true);
         return;
       }
       const requestId = String(message.id);
@@ -504,6 +521,7 @@ export class CodexAdapter implements AgentAdapter {
       });
       if (message.method === 'item/tool/requestUserInput' && questions.length === 0) {
         queue.push({ type: 'error', message: 'Codex 的输入请求没有可用问题。' });
+        finish(true);
         return;
       }
       const command = typeof params.command === 'string' ? `\n\n即将执行：\n\`${params.command}\`` : '';
@@ -568,10 +586,12 @@ export class CodexAdapter implements AgentAdapter {
 
     const start = async (): Promise<void> => {
       try {
-        await this.client.ensureStarted();
-        unsubscribe = this.client.onNotification(handleNotification);
-        unsubscribeRequests = this.client.onServerRequest(handleServerRequest);
+        await client.ensureStarted();
+        if (settled) return;
+        unsubscribe = client.onNotification(handleNotification);
+        unsubscribeRequests = client.onServerRequest(handleServerRequest);
         effectiveModel = opts.model ?? (opts.sessionId ? await this.resolveDefaultModel() : undefined);
+        if (settled) return;
         if (opts.sessionId) log.info('codex', 'resolved-model', { sessionId: opts.sessionId, model: effectiveModel ?? null });
         let thread: ThreadResponse;
         if (opts.sessionId) {
@@ -579,29 +599,26 @@ export class CodexAdapter implements AgentAdapter {
             thread = await client.request('thread/resume', {
               threadId: opts.sessionId,
               ...(opts.cwd ? { cwd: opts.cwd } : {}),
-          });
+              ...(effectiveModel ? { model: effectiveModel } : {}),
+            });
           } catch (err) {
             if (!isMissingRolloutError(err)) throw err;
             queue.push({ type: 'ui_notice', message: '原 Codex 会话没有可恢复的执行记录，已自动新建会话。', level: 'warning' });
-            thread = await this.startThread(opts.cwd);
+            thread = await this.startThread(client, opts.cwd, effectiveModel);
           }
         } else {
-          thread = await this.startThread(opts.cwd);
+          thread = await this.startThread(client, opts.cwd, effectiveModel);
         }
         threadId = thread.thread?.id ?? thread.id ?? opts.sessionId;
         if (!threadId) throw new Error('Codex app-server did not return a thread id');
-        const currentName = typeof thread.thread?.name === 'string' ? thread.thread.name : undefined;
-        const requestedName = opts.title?.replace(/\s+/g, ' ').trim();
-        if (requestedName && currentName !== requestedName) {
-          await this.setThreadName(threadId, requestedName);
-        }
+        if (settled) return;
         queue.push({ type: 'system', sessionId: threadId, cwd: opts.cwd, model: effectiveModel });
-        const turn = await requestTurn<{ id?: string; turn?: { id?: string } }>('turn/start', {
+        const turn = await requestTurn<{ id?: string; turn?: { id?: string } }>(client, 'turn/start', {
           threadId,
           input: [{ type: 'text', text: opts.prompt, text_elements: [] }],
           ...(opts.clientUserMessageId ? { clientUserMessageId: opts.clientUserMessageId } : {}),
           ...(opts.cwd ? { cwd: opts.cwd } : {}),
-          ...(opts.sessionId && effectiveModel && !replacementStarted ? { model: effectiveModel } : {}),
+          ...(effectiveModel ? { model: effectiveModel } : {}),
           ...(opts.additionalContext ? { additionalContext: opts.additionalContext } : {}),
         });
         turnId = turn.turn?.id ?? turn.id;
@@ -614,13 +631,7 @@ export class CodexAdapter implements AgentAdapter {
 
     return {
       events: queue,
-      async stop() {
-        stopped = true;
-        if (threadId && turnId && !settled) {
-          await client.request('turn/interrupt', { threadId, turnId }).catch(() => {});
-        }
-        finish();
-      },
+      stop,
       respondToUi(requestId: string, response: AgentUiResponse): boolean {
         const pending = pendingUi.get(requestId);
         if (!pending) return false;
@@ -666,14 +677,14 @@ export class CodexAdapter implements AgentAdapter {
       ): Promise<boolean> {
         if (!threadId || !turnId || settled) return false;
         if (kind === 'steer') {
-          await requestTurn('turn/steer', {
+          await requestTurn(client, 'turn/steer', {
             threadId,
             expectedTurnId: turnId,
             input: [{ type: 'text', text: message, text_elements: [] }],
             ...(additionalContext ? { additionalContext } : {}),
           });
         } else {
-          const response = await requestTurn<{ turn?: { id?: string } }>('turn/start', {
+          const response = await requestTurn<{ turn?: { id?: string } }>(client, 'turn/start', {
             threadId,
             input: [{ type: 'text', text: message, text_elements: [] }],
             ...(additionalContext ? { additionalContext } : {}),

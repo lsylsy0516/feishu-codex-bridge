@@ -221,11 +221,12 @@ export function sessionHistoryCard(
   page: SessionHistoryPage,
   offset = 0,
 ): object {
-  const activity = page.activities.length > 0
-    ? page.activities.map((item) => `**${escapeMd(item.kind)}**\n${truncateMarkdown(item.text, 1_000)}`).join('\n\n')
-    : '这个会话暂无可展示的文本历史。';
+  const replies = page.activities.filter((item) => item.kind === '助手');
+  const activity = replies.length > 0
+    ? replies.map((item) => truncateMarkdown(item.text, 1_000)).join('\n\n---\n\n')
+    : '暂无可展示的助手回复。';
   const position = page.total > 0
-    ? offset > 0 ? `更早的 ${page.activities.length} 条（共 ${page.total} 条）` : `最近 ${page.activities.length} 条（共 ${page.total} 条）`
+    ? `${offset > 0 ? '更早的' : '最近'} ${replies.length} 条助手回复（共 ${page.total} 条）`
     : '暂无历史';
   const historyActions: ButtonSpec[] = [];
   if (page.nextOffset !== undefined) {
@@ -239,7 +240,7 @@ export function sessionHistoryCard(
     historyActions.push({ text: '返回最近记录', value: { cmd: 'session.history', arg: `${threadId} 0` } });
   }
   const elements: object[] = [
-    { tag: 'markdown', content: `# 历史上下文\n项目：**${escapeMd(projectName)}**\n${position}\n\nCodex 已保留完整上下文，以下只是飞书中的历史预览。` },
+    { tag: 'markdown', content: `# 历史上下文\n项目：**${escapeMd(projectName)}**\n${position}` },
     HR,
     { tag: 'markdown', content: activity },
   ];

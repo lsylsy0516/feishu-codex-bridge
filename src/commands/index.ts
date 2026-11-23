@@ -614,6 +614,27 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
   const project = ctx.projectBindings.findProjectByChat(ctx.msg.chatId);
   if (!project) return reply(ctx, '当前群还没有绑定项目，请先从“选择项目”开始。');
   const action = args.trim();
+  if (action === 'history' || action.startsWith('history ')) {
+    const [explicitThreadId, rawOffset] = action.slice('history'.length).trim().split(/\s+/, 2);
+    const historyThreadId = explicitThreadId || currentTopicThreadId(ctx);
+    if (!historyThreadId || !ctx.agent.readSessionHistory) {
+      return reply(ctx, '请在已连接的 Codex 工作话题中查看历史。');
+    }
+    const binding = ctx.projectBindings.findTopicByThread(historyThreadId);
+    if (!binding || binding.projectKey !== project.projectKey) {
+      return reply(ctx, '这个会话尚未绑定到当前项目话题。');
+    }
+    const offset = Math.max(0, Number.parseInt(rawOffset ?? '0', 10) || 0);
+    const destination = { replyTo: ctx.msg.messageId, ...(ctx.msg.threadId ? { replyInThread: true } : {}) };
+    try {
+      const page = await ctx.agent.readSessionHistory(historyThreadId, offset);
+      await ctx.channel.send(ctx.msg.chatId, { card: sessionHistoryCard(project.name, historyThreadId, page, offset) }, destination);
+    } catch (err) {
+      log.warn('command', 'session-history-reply-failed', { threadId: historyThreadId, err: String(err) });
+      await ctx.channel.send(ctx.msg.chatId, { markdown: '历史预览加载失败，请稍后在本话题发送 `/session history` 重试。' }, destination);
+    }
+    return;
+  }
   const existingOpenBinding = action.startsWith('open ')
     ? ctx.projectBindings.findTopicByThread(action.slice(5).trim())
     : undefined;
@@ -653,22 +674,6 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
       title = found.name ?? found.preview.slice(0, 40) ?? '未命名会话';
     }
     restoreHistory = true;
-  } else if (action === 'history' || action.startsWith('history ')) {
-    const [explicitThreadId, rawOffset] = action === 'history'
-      ? []
-      : action.slice(8).trim().split(/\s+/, 2);
-    const historyThreadId = explicitThreadId || currentTopicThreadId(ctx);
-    if (!historyThreadId || !ctx.agent.readSessionHistory) {
-      return reply(ctx, '请在已连接的 Codex 工作话题中查看历史。');
-    }
-    const binding = ctx.projectBindings.findTopicByThread(historyThreadId);
-    if (!binding || binding.projectKey !== project.projectKey) {
-      return reply(ctx, '这个会话尚未绑定到当前项目话题。');
-    }
-    const offset = Math.max(0, Number.parseInt(rawOffset ?? '0', 10) || 0);
-    const page = await ctx.agent.readSessionHistory(historyThreadId, offset);
-    await sendCommandCard(ctx, sessionHistoryCard(project.name, historyThreadId, page, offset));
-    return;
   } else if (action.startsWith('detail ')) {
     const threadIdToShow = action.slice(7).trim();
     const found = await findProjectSession(ctx.agent, project.cwd, threadIdToShow);

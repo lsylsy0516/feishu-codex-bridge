@@ -123,7 +123,7 @@ export interface AppPreferences {
   ompTools?: string;
   /** Legacy Codex executable name or path. Used only when `ompBinary` is absent. */
   codexBinary?: string;
-  /** Legacy Codex model. Used only when `ompModel` is absent. */
+  /** Default model for Codex turns. Also a legacy fallback for ompModel. */
   codexModel?: string;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;

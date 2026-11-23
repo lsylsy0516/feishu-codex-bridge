@@ -413,8 +413,13 @@ describe('Codex project command workflow', () => {
     );
   });
 
-  it('shows history on demand inside an existing session topic', async () => {
+  it.each([
+    { fromCardAction: false, args: 'history', offset: 0 },
+    { fromCardAction: true, args: 'history', offset: 0 },
+    { fromCardAction: true, args: 'history thread-existing 10', offset: 10 },
+  ])('sends one history reply without rewriting the source: $args, button=$fromCardAction', async ({ fromCardAction, args, offset }) => {
     const send = vi.fn().mockResolvedValue({ messageId: 'history-card' });
+    const updateCard = vi.fn().mockResolvedValue(undefined);
     const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
     bindings.registerProjects([project]);
     await bindings.bindProject(project.projectKey, 'chat-project');
@@ -426,7 +431,8 @@ describe('Codex project command workflow', () => {
       activities: [{ kind: '助手', text: '**已渲染**' }],
       total: 1,
     });
-    const ctx = context({ send }, bindings);
+    const ctx = context({ send, updateCard }, bindings);
+    ctx.fromCardAction = fromCardAction;
     ctx.msg.chatId = 'chat-project';
     ctx.msg.chatType = 'group';
     ctx.msg.threadId = 'topic-existing';
@@ -438,9 +444,11 @@ describe('Codex project command workflow', () => {
       readSessionHistory,
     };
 
-    await runCommandHandler('session', 'history', ctx);
+    await runCommandHandler('session', args, ctx);
 
-    expect(readSessionHistory).toHaveBeenCalledWith('thread-existing', 0);
+    expect(readSessionHistory).toHaveBeenCalledWith('thread-existing', offset);
+    expect(updateCard).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith(
       'chat-project',
       { card: expect.objectContaining({ schema: '2.0' }) },

@@ -48,7 +48,13 @@ for await (const line of rl) {
     else { activeThreadId = msg.params.threadId; send({ id: msg.id, result: { thread: { id: msg.params.threadId, cwd: '/tmp/project' } } }); }
   }
   if (msg.method === 'thread/read') {
-    if (msg.params.threadId === 'history-thread') send({ id: msg.id, result: { thread: { id: 'history-thread', preview: 'history', cwd: '/tmp/project', updatedAt: 20, status: { type: 'idle' }, turns: [{ items: Array.from({ length: 23 }, (_, index) => ({ type: 'agentMessage', text: 'history-' + (index + 1) })) }] } } });
+    if (msg.params.threadId === 'history-thread') send({ id: msg.id, result: { thread: { id: 'history-thread', turns: Array.from({ length: 23 }, (_, index) => ({ items: [
+      { type: 'userMessage', content: [{ type: 'text', text: 'user prompt' }] },
+      { type: 'agentMessage', text: 'history-' + (index + 1) },
+      { type: 'commandExecution', command: 'tool details' },
+      { type: 'plan', text: 'plan details' },
+      { type: 'fileChange' },
+    ] })) } } });
     else if (msg.params.threadId === 'unloaded') send({ id: msg.id, error: { code: -32000, message: 'thread not loaded: unloaded' } });
     else send({ id: msg.id, result: { thread: { id: msg.params.threadId, sessionId: 'session-1', name: '详情会话', preview: '查看详情', cwd: '/tmp/project', updatedAt: 20, status: { type: 'active', activeFlags: ['waitingOnUserInput'] }, source: 'vscode', turns: [{ items: [{ type: 'userMessage', content: [{ type: 'text', text: '请查看', text_elements: [] }] }, { type: 'agentMessage', text: '正在查看' }, { type: 'commandExecution', command: 'pnpm test' }] }] } } });
   }
@@ -62,6 +68,12 @@ for await (const line of rl) {
       continue;
     }
     send({ id: msg.id, result: { turn: { id: 'turn-1' } } });
+    if (activeThreadId === 'crashed-thread') process.exit(3);
+    if (activeThreadId === 'failed-thread') {
+      send({ method: 'item/agentMessage/delta', params: { threadId: activeThreadId, delta: String(process.pid) } });
+      send({ method: 'error', params: { threadId: activeThreadId, error: { message: 'rate limited' } } });
+      continue;
+    }
     if (interaction === 'questions') {
       send({ method: 'item/tool/requestUserInput', id: 500, params: { threadId: activeThreadId, turnId: 'turn-1', itemId: 'item-input', questions: [
         { id: 'environment', header: '环境', question: '选择环境', isOther: false, isSecret: false, options: [{ label: '测试', description: '使用测试环境' }, { label: '生产', description: '使用生产环境' }] },
@@ -80,7 +92,7 @@ for await (const line of rl) {
     const hasInjectedContext = msg.params.additionalContext?.['feishu.bridge.turn']?.value === '{"chat":"oc_context"}';
     const delta = msg.params.clientUserMessageId === 'context-message'
       ? hasInjectedContext ? '上下文已注入' : '上下文缺失'
-      : msg.params.clientUserMessageId === 'msg-1' && activeThreadName === '干净标题' ? '兼容完成' : '完成';
+      : msg.params.clientUserMessageId === 'msg-1' ? JSON.stringify([activeThreadName, msg.params.model]) : '完成';
     send({ method: 'item/agentMessage/delta', params: { threadId: activeThreadId, turnId: 'turn-1', itemId: 'item-1', delta } });
     send({ method: 'turn/completed', params: { threadId: activeThreadId, turn: { id: 'turn-1', status: 'completed' } } });
   }
@@ -148,7 +160,7 @@ describe('CodexAdapter', () => {
     await adapter.close();
   });
 
-  it('pages session history backwards while preserving chronological order', async () => {
+  it('counts and pages only assistant replies while preserving chronological order', async () => {
     const adapter = new CodexAdapter({ binary: await fakeCodex() });
     await expect(adapter.readSessionHistory?.('history-thread', 0)).resolves.toEqual({
       activities: Array.from({ length: 10 }, (_, index) => ({ kind: '助手', text: `history-${index + 14}` })),
@@ -231,29 +243,46 @@ describe('CodexAdapter', () => {
     await adapter.close();
   });
 
-  it('renames an existing session for Feishu topic title sync', async () => {
+  it('ends a pending turn when the writer crashes before sending a final notification', async () => {
     const adapter = new CodexAdapter({ binary: await fakeCodex() });
-    await adapter.renameSession('thread-existing', ' 飞书话题标题 ');
-    await expect(adapter.listSessions('/tmp/project')).resolves.toContainEqual(expect.objectContaining({
-      threadId: 'thread-existing',
-      name: '飞书话题标题',
-    }));
-    await adapter.close();
+    try {
+      const run = adapter.run({ prompt: '失败', sessionId: 'crashed-thread' });
+      await expect(collect(run.events)).resolves.toContainEqual({ type: 'error', message: 'Codex app-server exited (3)' });
+      expect(await run.waitForExit(1000)).toBe(true);
+    } finally {
+      await adapter.close();
+    }
   });
 
-  it('writes desktop-compatible metadata, a clean title and a stable user message id', async () => {
+  it('exits the writer process after an error while the adapter stays available', async () => {
+    const adapter = new CodexAdapter({ binary: await fakeCodex() });
+    try {
+      const run = adapter.run({ prompt: '失败', sessionId: 'failed-thread' });
+      let writerPid: number | undefined;
+      for await (const e of run.events) {
+        if (e.type === 'text') writerPid = Number(e.delta);
+        if (e.type === 'error') break;
+      }
+      expect(await run.waitForExit(1500)).toBe(true);
+      expect(writerPid).toBeGreaterThan(0);
+      expect(() => process.kill(writerPid!, 0)).toThrowError(expect.objectContaining({ code: 'ESRCH' }));
+      expect((await adapter.listSessions('/tmp/project')).length).toBe(1);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it.each([undefined, 'thread-existing'])('preserves the native title and uses the configured model (%s)', async (sessionId) => {
     const adapter = new CodexAdapter({ binary: await fakeCodex() });
     const run = adapter.run({
       prompt: '请测试',
       title: '干净标题',
+      model: 'singapore/codex/gpt-6.2-sol',
+      sessionId,
       clientUserMessageId: 'msg-1',
       cwd: '/tmp/project',
     });
-    await expect(collect(run.events)).resolves.toEqual([
-      { type: 'system', sessionId: 'thread-new', cwd: '/tmp/project', model: undefined },
-      { type: 'text', delta: '兼容完成' },
-      { type: 'done', sessionId: 'thread-new' },
-    ]);
+    await expect(collect(run.events)).resolves.toContainEqual({ type: 'text', delta: '["","singapore/codex/gpt-6.2-sol"]' });
     await adapter.close();
   });
 

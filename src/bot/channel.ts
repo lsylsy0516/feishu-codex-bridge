@@ -66,7 +66,7 @@ import { isThreadScoped } from './scope';
 import { SessionSyncManager } from '../session/sync';
 import { showProjectWorkbench } from '../project/workbench';
 import { bindNativeTopicSession } from '../project/topic-session';
-import { fetchFeishuTopicTitle, syncBoundTopicTitles } from '../project/topic-title-sync';
+import { fetchFeishuTopicTitle } from '../project/topic-title-sync';
 import { FEISHU_ASSISTANT_PROJECT_KEY } from '../project/assistant';
 import { threadTitleFromText } from './thread-title';
 
@@ -277,7 +277,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+      const processing = withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
         await handleCardAction({
           channel,
           evt,
@@ -294,6 +294,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           taskStore,
         });
       }).catch((err) => log.fail('cardAction', err));
+      const value = evt.action.value;
+      if (value && typeof value === 'object' && 'cmd' in value && value.cmd === 'session.history') return;
+      await processing;
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
@@ -353,13 +356,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     appId: cfg.accounts.app.id,
     procId: controls.processId,
   });
-  if (agent.renameSession && projectBindings?.allTopics) {
-    void syncBoundTopicTitles(channel, agent, projectBindings)
-      .then((result) => log.info('session', 'topic-title-reconcile-complete', result))
-      .catch((err) => log.warn('session', 'topic-title-reconcile-failed', {
-        err: err instanceof Error ? err.message : String(err),
-      }));
-  }
   console.log('正在监听消息。按 Ctrl+C 退出。\n');
 
   // App-level keepalive: 15s probe + wake-up detection + HTTP reachability.
@@ -761,7 +757,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       title,
       sessionId: resumeFrom,
       cwd,
-      model: getOmpModel(controls.cfg),
+      model: getAgentBackend(controls.cfg) === 'codex'
+        ? controls.cfg.preferences?.codexModel?.trim() || undefined
+        : getOmpModel(controls.cfg),
       imagePaths,
       stopGraceMs: getAgentStopGraceMs(controls.cfg),
       hostTools: feishuHost.tools,

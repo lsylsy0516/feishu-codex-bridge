@@ -102,6 +102,7 @@ describe('project-first Feishu cards', () => {
     const historyCard = sessionHistoryCard('示例项目', 'thread-1', {
       activities: [
         { kind: '用户', text: '请继续修复' },
+        { kind: '工具', text: 'sensitive tool command' },
         { kind: '助手', text: '**关键结论**\n\n`rod-body` 已完成\n\n## 下一步' },
       ],
       nextOffset: 10,
@@ -113,8 +114,9 @@ describe('project-first Feishu cards', () => {
     expect(card).toContain('历史上下文');
     expect(card).toContain('"schema":"2.0"');
     expect(card).toContain('"tag":"markdown"');
-    expect(card).toContain('Codex 已保留完整上下文');
-    expect(card).toContain('请继续修复');
+    expect(card).toContain('最近 1 条助手回复（共 22 条）');
+    expect(card).not.toContain('请继续修复');
+    expect(card).not.toContain('sensitive tool command');
     expect(card).toContain('**关键结论**');
     expect(card).toContain('`rod-body`');
     expect(card).toContain('## 下一步');
@@ -122,7 +124,7 @@ describe('project-first Feishu cards', () => {
     expect(card).toContain('加载更早记录');
     expect(card).toContain('thread-1 10');
     expect(text(sessionHistoryCard('示例项目', 'thread-empty', { activities: [], total: 0 }, 0)))
-      .toContain('暂无可展示的文本历史');
+      .toContain('暂无可展示的助手回复');
   });
 
   it('keeps task cards concise while exposing acceptance evidence', () => {

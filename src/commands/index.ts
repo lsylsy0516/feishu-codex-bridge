@@ -628,10 +628,13 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     if (!found) return reply(ctx, '没有找到这个会话，请刷新会话列表。');
     title = found.name ?? found.preview.slice(0, 40) ?? '未命名会话';
     restoreHistory = true;
-  } else if (action.startsWith('history ')) {
-    const [historyThreadId, rawOffset] = action.slice(8).trim().split(/\s+/, 2);
+  } else if (action === 'history' || action.startsWith('history ')) {
+    const [explicitThreadId, rawOffset] = action === 'history'
+      ? []
+      : action.slice(8).trim().split(/\s+/, 2);
+    const historyThreadId = explicitThreadId || currentTopicThreadId(ctx);
     if (!historyThreadId || !ctx.agent.readSessionHistory) {
-      return reply(ctx, '当前 Codex 版本不支持读取会话历史。');
+      return reply(ctx, '请在已连接的 Codex 工作话题中查看历史。');
     }
     const binding = ctx.projectBindings.findTopicByThread(historyThreadId);
     if (!binding || binding.projectKey !== project.projectKey) {

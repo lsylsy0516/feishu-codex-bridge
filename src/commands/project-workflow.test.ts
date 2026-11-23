@@ -327,4 +327,39 @@ describe('Codex project command workflow', () => {
       { replyTo: 'root-restored', replyInThread: true },
     );
   });
+
+  it('shows history on demand inside an existing session topic', async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: 'history-card' });
+    const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+    bindings.registerProjects([project]);
+    await bindings.bindProject(project.projectKey, 'chat-project');
+    await bindings.bindTopic({
+      chatId: 'chat-project', topicId: 'topic-existing', projectKey: project.projectKey,
+      codexThreadId: 'thread-existing', createdBy: 'user-1', updatedAt: 1,
+    });
+    const readSessionHistory = vi.fn().mockResolvedValue({
+      activities: [{ kind: '助手', text: '**已渲染**' }],
+      total: 1,
+    });
+    const ctx = context({ send }, bindings);
+    ctx.msg.chatId = 'chat-project';
+    ctx.msg.chatType = 'group';
+    ctx.msg.threadId = 'topic-existing';
+    ctx.scope = 'chat-project:topic-existing';
+    ctx.agent = {
+      ...ctx.agent,
+      createSession: vi.fn(),
+      listSessions: vi.fn().mockResolvedValue([]),
+      readSessionHistory,
+    };
+
+    await runCommandHandler('session', 'history', ctx);
+
+    expect(readSessionHistory).toHaveBeenCalledWith('thread-existing', 0);
+    expect(send).toHaveBeenCalledWith(
+      'chat-project',
+      { card: expect.objectContaining({ schema: '2.0' }) },
+      { replyTo: 'message-1', replyInThread: true },
+    );
+  });
 });

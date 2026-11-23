@@ -392,6 +392,7 @@ export function topicWelcomeCard(projectName: string, sessionTitle: string, cwd:
     divMd('会话会保存到本机 Codex。桌面端侧栏若暂未出现，请切换为按时间排序或重启桌面端；这不影响在飞书继续使用。'),
     actions([
       { text: '刷新进度', value: { cmd: 'sync' }, style: 'primary' },
+      { text: '查看历史', value: { cmd: 'session.history' } },
     ]),
     actions([
       { text: '切换会话', value: { cmd: 'sessions' } },

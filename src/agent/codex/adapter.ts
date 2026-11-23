@@ -1,7 +1,7 @@
 import type { AgentAdapter, AgentAdditionalContext, AgentEvent, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
 import { log } from '../../core/logger';
 import { CodexAppServerClient, type JsonRpcNotification, type JsonRpcServerRequest } from './app-server';
-import type { SessionActivity, SessionDetail, SessionPage, SessionSummary } from '../../project/types';
+import type { SessionActivity, SessionDetail, SessionHistoryPage, SessionPage, SessionSummary } from '../../project/types';
 
 interface QueueValue<T> { value?: T; done?: boolean }
 
@@ -52,6 +52,11 @@ interface ThreadResponse {
 }
 
 const BRIDGE_SERVICE_NAME = 'feishu_codex_bridge';
+// A session consumes three top-level card elements (separator, summary and
+// actions). Keep pages small enough for Feishu's interactive-card element
+// budget; the app-server cursor still exposes the remaining sessions.
+const FEISHU_SESSION_PAGE_SIZE = 10;
+const FEISHU_HISTORY_PAGE_SIZE = 10;
 
 export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
@@ -132,7 +137,7 @@ export class CodexAdapter implements AgentAdapter {
   async listSessionPage(cwd: string, cursor?: string, searchTerm?: string): Promise<SessionPage> {
     const response = await this.client.request<{ data?: Array<Record<string, unknown>>; nextCursor?: string | null }>('thread/list', {
       cwd,
-      limit: 50,
+      limit: FEISHU_SESSION_PAGE_SIZE,
       archived: false,
       sourceKinds: ['cli', 'vscode', 'appServer'],
       sortKey: 'updated_at',
@@ -146,6 +151,30 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async readSession(threadId: string): Promise<SessionDetail> {
+    const thread = await this.readThread(threadId);
+    const summary = mapThread(thread, typeof thread.cwd === 'string' ? thread.cwd : '');
+    if (!summary) throw new Error('Codex app-server returned an invalid session');
+    const turns = Array.isArray(thread.turns) ? thread.turns : [];
+    const recentActivity = flattenThreadActivity(thread).slice(-8);
+    return { ...summary, turnCount: turns.length, recentActivity };
+  }
+
+  async readSessionHistory(threadId: string, offset = 0): Promise<SessionHistoryPage> {
+    const thread = await this.readThread(threadId);
+    const activities = flattenThreadActivity(thread);
+    const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+    const end = Math.max(0, activities.length - safeOffset);
+    const start = Math.max(0, end - FEISHU_HISTORY_PAGE_SIZE);
+    const page = activities.slice(start, end);
+    const consumed = activities.length - start;
+    return {
+      activities: page,
+      total: activities.length,
+      ...(start > 0 ? { nextOffset: consumed } : {}),
+    };
+  }
+
+  private async readThread(threadId: string): Promise<Record<string, unknown>> {
     let response: { thread?: Record<string, unknown> };
     try {
       response = await this.client.request('thread/read', { threadId, includeTurns: true });
@@ -154,18 +183,8 @@ export class CodexAdapter implements AgentAdapter {
       log.info('codex', 'read-session-resume-fallback', { threadId });
       response = await this.client.request('thread/resume', { threadId });
     }
-    const thread = response.thread;
-    if (!thread) throw new Error('Codex app-server did not return the session');
-    const summary = mapThread(thread, typeof thread.cwd === 'string' ? thread.cwd : '');
-    if (!summary) throw new Error('Codex app-server returned an invalid session');
-    const turns = Array.isArray(thread.turns) ? thread.turns : [];
-    const recentActivity = turns.flatMap((turn) => {
-      const items = turn && typeof turn === 'object' && Array.isArray((turn as { items?: unknown[] }).items)
-        ? (turn as { items: unknown[] }).items
-        : [];
-      return items.map(summarizeActivity).filter((item): item is SessionActivity => item !== undefined);
-    }).slice(-8);
-    return { ...summary, turnCount: turns.length, recentActivity };
+    if (!response.thread) throw new Error('Codex app-server did not return the session');
+    return response.thread;
   }
 
   async listProjectRoots(): Promise<string[]> {
@@ -742,4 +761,14 @@ function summarizeActivity(item: unknown): SessionActivity | undefined {
     default:
       return undefined;
   }
+}
+
+function flattenThreadActivity(thread: Record<string, unknown>): SessionActivity[] {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  return turns.flatMap((turn) => {
+    const items = turn && typeof turn === 'object' && Array.isArray((turn as { items?: unknown[] }).items)
+      ? (turn as { items: unknown[] }).items
+      : [];
+    return items.map(summarizeActivity).filter((item): item is SessionActivity => item !== undefined);
+  });
 }

@@ -82,6 +82,58 @@ describe('Codex project command workflow', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('falls back to a reply in the same topic when a card update stalls', async () => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn().mockResolvedValue({ messageId: 'message-2' });
+      const updateCard = vi.fn().mockReturnValue(new Promise<void>(() => {}));
+      const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+      bindings.registerProjects([project]);
+      const ctx = context({ send, updateCard }, bindings);
+      ctx.fromCardAction = true;
+      ctx.msg.threadId = 'topic-1';
+
+      const handled = runCommandHandler('projects', '', ctx);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await handled;
+
+      expect(send).toHaveBeenLastCalledWith(
+        'chat-dm',
+        { card: expect.objectContaining({ header: expect.any(Object) }) },
+        { replyTo: 'message-1', replyInThread: true },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the persistent project workbench and replies with the session list', async () => {
+    const send = vi.fn().mockResolvedValue({ messageId: 'message-2' });
+    const updateCard = vi.fn().mockResolvedValue(undefined);
+    const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+    bindings.registerProjects([project]);
+    await bindings.bindProject(project.projectKey, 'chat-dm');
+    await bindings.bindProjectHomeMessage(project.projectKey, 'message-1');
+    const ctx = context({ send, updateCard }, bindings);
+    ctx.fromCardAction = true;
+    ctx.msg.threadId = 'topic-1';
+    ctx.agent = {
+      ...ctx.agent,
+      listSessions: vi.fn().mockResolvedValue([]),
+      listSessionPage: vi.fn().mockResolvedValue({ sessions: [] }),
+    };
+
+    await runCommandHandler('sessions', '', ctx);
+
+    expect(updateCard).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(
+      'chat-dm',
+      { card: expect.objectContaining({ header: expect.objectContaining({ title: expect.objectContaining({ content: '会话列表' }) }) }) },
+      { replyTo: 'message-1', replyInThread: true },
+    );
+  });
+
   it('does not create a second project group after a repeated click', async () => {
     const create = vi.fn().mockResolvedValue({ data: { chat_id: 'chat-project' } });
     const send = vi.fn().mockResolvedValue({ messageId: 'message-2' });
@@ -233,5 +285,43 @@ describe('Codex project command workflow', () => {
     expect(compactSession).toHaveBeenCalledWith('thread-source');
     expect(forkSession).toHaveBeenCalledWith('thread-source', project.cwd);
     expect(bindings.findTopic('chat-project', 'topic-fork')).toMatchObject({ codexThreadId: 'thread-fork' });
+  });
+
+  it('posts recent history inside a newly restored session topic', async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ messageId: 'root-restored' })
+      .mockResolvedValue({ messageId: 'history-card' });
+    const updateCard = vi.fn().mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({ data: { items: [{ thread_id: 'topic-restored' }] } });
+    const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
+    bindings.registerProjects([project]);
+    await bindings.bindProject(project.projectKey, 'chat-project');
+    const readSessionHistory = vi.fn().mockResolvedValue({
+      activities: [{ kind: '用户', text: '上次的问题' }, { kind: '助手', text: '上次的回答' }],
+      total: 2,
+    });
+    const ctx = context({ send, updateCard, rawClient: { im: { v1: { message: { get } } } } }, bindings);
+    ctx.msg.chatId = 'chat-project';
+    ctx.msg.chatType = 'group';
+    ctx.fromCardAction = true;
+    ctx.agent = {
+      ...ctx.agent,
+      createSession: vi.fn(),
+      listSessions: vi.fn().mockResolvedValue([{
+        threadId: 'thread-restored', name: '旧会话', preview: '上次的对话', cwd: project.cwd,
+        status: 'idle', updatedAt: 2,
+      }]),
+      readSessionHistory,
+    };
+
+    await runCommandHandler('session', 'open thread-restored', ctx);
+
+    expect(bindings.findTopic('chat-project', 'topic-restored')).toMatchObject({ codexThreadId: 'thread-restored' });
+    expect(readSessionHistory).toHaveBeenCalledWith('thread-restored', 0);
+    expect(send).toHaveBeenCalledWith(
+      'chat-project',
+      { card: expect.objectContaining({ header: expect.objectContaining({ title: expect.objectContaining({ content: '历史上下文' }) }) }) },
+      { replyTo: 'root-restored', replyInThread: true },
+    );
   });
 });

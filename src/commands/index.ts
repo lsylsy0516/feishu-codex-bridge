@@ -18,6 +18,7 @@ import {
   projectsCard,
   sessionProgressCard,
   sessionDetailCard,
+  sessionHistoryCard,
   sessionSearchCard,
   sessionsCard,
   taskDetailCard,
@@ -242,17 +243,47 @@ async function reply(ctx: CommandContext, markdown: string): Promise<void> {
   }
 }
 
+const COMMAND_CARD_UPDATE_TIMEOUT_MS = 5_000;
+const degradedCommandCards = new WeakSet<CommandContext>();
+
 /** Replace the clicked card so the group keeps one visible source of truth. */
 async function sendCommandCard(ctx: CommandContext, card: object): Promise<void> {
-  if (ctx.fromCardAction) {
+  if (ctx.fromCardAction && !isPersistentProjectWorkbench(ctx) && !degradedCommandCards.has(ctx)) {
     try {
-      await ctx.channel.updateCard(ctx.msg.messageId, card);
+      await withTimeout(
+        ctx.channel.updateCard(ctx.msg.messageId, card),
+        COMMAND_CARD_UPDATE_TIMEOUT_MS,
+        'Feishu card update timed out',
+      );
       return;
     } catch (err) {
+      degradedCommandCards.add(ctx);
       log.warn('command', 'card-update-failed', { err: String(err) });
     }
   }
-  await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+  await ctx.channel.send(ctx.msg.chatId, { card }, {
+    replyTo: ctx.msg.messageId,
+    ...(ctx.msg.threadId ? { replyInThread: true } : {}),
+  });
+}
+
+function isPersistentProjectWorkbench(ctx: CommandContext): boolean {
+  const project = ctx.projectBindings?.findProjectByChat(ctx.msg.chatId);
+  return Boolean(project?.homeMessageId && project.homeMessageId === ctx.msg.messageId);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function commandFeedback(
@@ -274,7 +305,7 @@ async function commandFeedback(
 }
 
 async function commandProgress(ctx: CommandContext, detail: string): Promise<void> {
-  if (!ctx.fromCardAction) return;
+  if (!ctx.fromCardAction || isPersistentProjectWorkbench(ctx)) return;
   await sendCommandCard(ctx, projectFeedbackCard('正在处理', `↻ ${detail}`));
 }
 
@@ -586,18 +617,33 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
   const action = args.trim();
   let threadId: string;
   let title: string;
+  let restoreHistory = false;
   if (action === 'new' || action === '') {
     const created = await ctx.agent.createSession(project.cwd);
     threadId = created.threadId;
     title = created.name ?? '新建会话';
   } else if (action.startsWith('open ')) {
     threadId = action.slice(5).trim();
-    const found = (await ctx.agent.listSessions(project.cwd)).find((session) => session.threadId === threadId);
+    const found = await findProjectSession(ctx.agent, project.cwd, threadId);
     if (!found) return reply(ctx, '没有找到这个会话，请刷新会话列表。');
     title = found.name ?? found.preview.slice(0, 40) ?? '未命名会话';
+    restoreHistory = true;
+  } else if (action.startsWith('history ')) {
+    const [historyThreadId, rawOffset] = action.slice(8).trim().split(/\s+/, 2);
+    if (!historyThreadId || !ctx.agent.readSessionHistory) {
+      return reply(ctx, '当前 Codex 版本不支持读取会话历史。');
+    }
+    const binding = ctx.projectBindings.findTopicByThread(historyThreadId);
+    if (!binding || binding.projectKey !== project.projectKey) {
+      return reply(ctx, '这个会话尚未绑定到当前项目话题。');
+    }
+    const offset = Math.max(0, Number.parseInt(rawOffset ?? '0', 10) || 0);
+    const page = await ctx.agent.readSessionHistory(historyThreadId, offset);
+    await sendCommandCard(ctx, sessionHistoryCard(project.name, historyThreadId, page, offset));
+    return;
   } else if (action.startsWith('detail ')) {
     const threadIdToShow = action.slice(7).trim();
-    const found = (await ctx.agent.listSessions(project.cwd)).find((session) => session.threadId === threadIdToShow);
+    const found = await findProjectSession(ctx.agent, project.cwd, threadIdToShow);
     if (!found) return reply(ctx, '没有找到这个会话。');
     if (!ctx.agent.readSession || !ctx.fromCardAction) {
       return reply(ctx, `会话：**${found.name ?? '未命名'}**\n最近内容：${found.preview}\n状态：${sessionStatusText(found.status, found.activeFlags)}`);
@@ -607,7 +653,7 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     return;
   } else if (action.startsWith('archive ')) {
     const threadIdToArchive = action.slice(8).trim();
-    const found = (await ctx.agent.listSessions(project.cwd)).find((session) => session.threadId === threadIdToArchive);
+    const found = await findProjectSession(ctx.agent, project.cwd, threadIdToArchive);
     if (!found) return reply(ctx, '没有找到这个会话，请刷新会话列表。');
     if (!ctx.agent.archiveSession) return reply(ctx, '当前 Codex 版本不支持归档会话。');
     await ctx.agent.archiveSession(threadIdToArchive);
@@ -685,7 +731,8 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     ]);
     return;
   }
-  await createSessionTopic(ctx, project, threadId, title);
+  const topic = await createSessionTopic(ctx, project, threadId, title);
+  if (restoreHistory) await sendInitialSessionHistory(ctx, project, threadId, topic.rootMessageId);
 }
 
 async function createSessionTopic(
@@ -693,7 +740,7 @@ async function createSessionTopic(
   project: Project,
   threadId: string,
   title: string,
-): Promise<void> {
+): Promise<{ rootMessageId: string; topicId: string }> {
   if (!ctx.projectBindings) throw new Error('项目绑定存储未启用');
   const root = await ctx.channel.send(ctx.msg.chatId, { card: topicWelcomeCard(project.name, title, project.cwd) });
   // `send()` returns the root message id (`om_...`), while topic messages
@@ -711,12 +758,50 @@ async function createSessionTopic(
   await commandFeedback(ctx, '话题已创建', `会话：**${title}**\n项目群中已出现以“项目名 · 会话名”命名的新话题。进入该话题后，直接发送需求即可。`, [
     { text: '查看会话', value: { cmd: 'sessions' }, style: 'primary' },
   ]);
+  return { rootMessageId: root.messageId, topicId };
+}
+
+async function sendInitialSessionHistory(
+  ctx: CommandContext,
+  project: Project,
+  threadId: string,
+  rootMessageId: string,
+): Promise<void> {
+  if (!ctx.agent.readSessionHistory) return;
+  try {
+    const page = await ctx.agent.readSessionHistory(threadId, 0);
+    await ctx.channel.send(ctx.msg.chatId, { card: sessionHistoryCard(project.name, threadId, page, 0) }, {
+      replyTo: rootMessageId,
+      replyInThread: true,
+    });
+  } catch (err) {
+    log.warn('command', 'session-history-preview-failed', { threadId, err: String(err) });
+    await ctx.channel.send(ctx.msg.chatId, {
+      markdown: `历史预览加载失败，但 Codex 完整上下文仍已恢复。\n\n${operationError(err)}`,
+    }, { replyTo: rootMessageId, replyInThread: true });
+  }
 }
 
 function currentTopicThreadId(ctx: CommandContext): string | undefined {
   return ctx.msg.threadId
     ? ctx.projectBindings?.findTopic(ctx.msg.chatId, ctx.msg.threadId)?.codexThreadId
     : undefined;
+}
+
+async function findProjectSession(
+  agent: AgentAdapter,
+  cwd: string,
+  threadId: string,
+): Promise<import('../project/types').SessionSummary | undefined> {
+  const listed = (await agent.listSessions?.(cwd))?.find((session) => session.threadId === threadId);
+  if (listed) return listed;
+  if (!agent.readSession) return undefined;
+  try {
+    const session = await agent.readSession(threadId);
+    return session.cwd === cwd ? session : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeFormText(value: unknown): string | undefined {

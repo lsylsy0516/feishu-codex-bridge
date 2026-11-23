@@ -34,6 +34,14 @@ export interface SessionActivity {
   text: string;
 }
 
+export interface SessionHistoryPage {
+  /** Activities in chronological order within this page. */
+  activities: SessionActivity[];
+  /** Number of newest activities already skipped when loading an older page. */
+  nextOffset?: number;
+  total: number;
+}
+
 export interface SessionDetail extends SessionSummary {
   turnCount: number;
   recentActivity: SessionActivity[];

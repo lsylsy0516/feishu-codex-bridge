@@ -1,4 +1,4 @@
-import type { SessionDetail } from '../project/types';
+import type { SessionDetail, SessionHistoryPage } from '../project/types';
 import type { TaskRecord } from '../task/types';
 
 interface ButtonSpec {
@@ -204,6 +204,38 @@ export function sessionDetailCard(projectName: string, detail: SessionDetailCard
       { text: '返回会话列表', value: { cmd: 'sessions' } },
     ]),
   ]);
+}
+
+export function sessionHistoryCard(
+  projectName: string,
+  threadId: string,
+  page: SessionHistoryPage,
+  offset = 0,
+): object {
+  const activity = page.activities.length > 0
+    ? page.activities.map((item) => `**${escapeMd(item.kind)}**\n${escapeMd(item.text.slice(0, 360))}`).join('\n\n')
+    : '这个会话暂无可展示的文本历史。';
+  const position = page.total > 0
+    ? offset > 0 ? `更早的 ${page.activities.length} 条（共 ${page.total} 条）` : `最近 ${page.activities.length} 条（共 ${page.total} 条）`
+    : '暂无历史';
+  const historyActions: ButtonSpec[] = [];
+  if (page.nextOffset !== undefined) {
+    historyActions.push({
+      text: '加载更早记录',
+      value: { cmd: 'session.history', arg: `${threadId} ${page.nextOffset}` },
+      style: 'primary',
+    });
+  }
+  if (offset > 0) {
+    historyActions.push({ text: '返回最近记录', value: { cmd: 'session.history', arg: `${threadId} 0` } });
+  }
+  const elements: object[] = [
+    divMd(`项目：**${escapeMd(projectName)}**\n${position}\n\nCodex 已保留完整上下文，以下只是飞书中的历史预览。`),
+    HR,
+    divMd(activity),
+  ];
+  if (historyActions.length > 0) elements.push(HR, actions(historyActions));
+  return shell('历史上下文', elements);
 }
 
 export function sessionProgressCard(projectName: string, detail: SessionDetail, autoSync = false): object {

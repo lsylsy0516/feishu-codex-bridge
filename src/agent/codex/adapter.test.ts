@@ -21,7 +21,13 @@ let activeThreadName = '';
 for await (const line of rl) {
   const msg = JSON.parse(line);
   if (msg.method === 'initialize') send({ id: msg.id, result: {} });
-  if (msg.method === 'thread/list') send({ id: msg.id, result: { data: [{ id: 'thread-existing', name: msg.params.searchTerm ? '匹配会话' : activeThreadName || '旧会话', preview: '修复卡片', cwd: '/tmp/project', updatedAt: 10, status: { type: 'idle' } }], nextCursor: msg.params.cursor ? null : 'cursor-2', backwardsCursor: null } });
+  if (msg.method === 'thread/list') {
+    if (msg.params.cwd && msg.params.limit !== 10) {
+      send({ id: msg.id, error: { code: -32602, message: 'project session pages must stay within the Feishu card size budget' } });
+      continue;
+    }
+    send({ id: msg.id, result: { data: [{ id: 'thread-existing', name: msg.params.searchTerm ? '匹配会话' : activeThreadName || '旧会话', preview: '修复卡片', cwd: '/tmp/project', updatedAt: 10, status: { type: 'idle' } }], nextCursor: msg.params.cursor ? null : 'cursor-2', backwardsCursor: null } });
+  }
   if (msg.method === 'model/list') send({ id: msg.id, result: { data: [{ model: 'gpt-5.6-sol', isDefault: true }] } });
   if (msg.method === 'thread/start') {
     if (rejectDesktopMetadata && msg.params.threadSource) {
@@ -42,7 +48,8 @@ for await (const line of rl) {
     else { activeThreadId = msg.params.threadId; send({ id: msg.id, result: { thread: { id: msg.params.threadId, cwd: '/tmp/project' } } }); }
   }
   if (msg.method === 'thread/read') {
-    if (msg.params.threadId === 'unloaded') send({ id: msg.id, error: { code: -32000, message: 'thread not loaded: unloaded' } });
+    if (msg.params.threadId === 'history-thread') send({ id: msg.id, result: { thread: { id: 'history-thread', preview: 'history', cwd: '/tmp/project', updatedAt: 20, status: { type: 'idle' }, turns: [{ items: Array.from({ length: 23 }, (_, index) => ({ type: 'agentMessage', text: 'history-' + (index + 1) })) }] } } });
+    else if (msg.params.threadId === 'unloaded') send({ id: msg.id, error: { code: -32000, message: 'thread not loaded: unloaded' } });
     else send({ id: msg.id, result: { thread: { id: msg.params.threadId, sessionId: 'session-1', name: '详情会话', preview: '查看详情', cwd: '/tmp/project', updatedAt: 20, status: { type: 'active', activeFlags: ['waitingOnUserInput'] }, source: 'vscode', turns: [{ items: [{ type: 'userMessage', content: [{ type: 'text', text: '请查看', text_elements: [] }] }, { type: 'agentMessage', text: '正在查看' }, { type: 'commandExecution', command: 'pnpm test' }] }] } } });
   }
   if (msg.method === 'thread/name/set') {
@@ -138,6 +145,25 @@ describe('CodexAdapter', () => {
     });
     await expect(adapter.compactSession?.('thread-existing')).resolves.toBeUndefined();
     await expect(adapter.reviewSession?.('thread-existing')).resolves.toBeUndefined();
+    await adapter.close();
+  });
+
+  it('pages session history backwards while preserving chronological order', async () => {
+    const adapter = new CodexAdapter({ binary: await fakeCodex() });
+    await expect(adapter.readSessionHistory?.('history-thread', 0)).resolves.toEqual({
+      activities: Array.from({ length: 10 }, (_, index) => ({ kind: '助手', text: `history-${index + 14}` })),
+      nextOffset: 10,
+      total: 23,
+    });
+    await expect(adapter.readSessionHistory?.('history-thread', 10)).resolves.toEqual({
+      activities: Array.from({ length: 10 }, (_, index) => ({ kind: '助手', text: `history-${index + 4}` })),
+      nextOffset: 20,
+      total: 23,
+    });
+    await expect(adapter.readSessionHistory?.('history-thread', 20)).resolves.toEqual({
+      activities: Array.from({ length: 3 }, (_, index) => ({ kind: '助手', text: `history-${index + 1}` })),
+      total: 23,
+    });
     await adapter.close();
   });
 

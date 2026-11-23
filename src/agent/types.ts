@@ -167,6 +167,8 @@ export interface AgentAdapter {
   listSessionPage?(cwd: string, cursor?: string, searchTerm?: string): Promise<import('../project/types').SessionPage>;
   listProjectRoots?(): Promise<string[]>;
   readSession?(threadId: string): Promise<import('../project/types').SessionDetail>;
+  /** Read a Feishu-sized history page, walking backwards from the latest activity. */
+  readSessionHistory?(threadId: string, offset?: number): Promise<import('../project/types').SessionHistoryPage>;
   createSession?(cwd: string): Promise<import('../project/types').SessionSummary>;
   renameSession?(threadId: string, title: string): Promise<void>;
   archiveSession?(threadId: string): Promise<void>;

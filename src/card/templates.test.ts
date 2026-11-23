@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { projectWelcomeCard, projectsCard, sessionDetailCard, sessionProgressCard, sessionSearchCard, sessionsCard, taskDetailCard, tasksCard, presetsCard, topicTitle, topicWelcomeCard, welcomeCard } from './templates';
+import { projectWelcomeCard, projectsCard, sessionDetailCard, sessionHistoryCard, sessionProgressCard, sessionSearchCard, sessionsCard, taskDetailCard, tasksCard, presetsCard, topicTitle, topicWelcomeCard, welcomeCard } from './templates';
 import type { SessionDetail } from '../project/types';
 import type { TaskRecord } from '../task/types';
 
@@ -95,6 +95,21 @@ describe('project-first Feishu cards', () => {
     const card = text(sessionDetailCard('示例项目', detail));
     expect(card).toContain('归档会话');
     expect(card).toContain('返回会话列表');
+  });
+
+  it('renders paged history with a load-older action', () => {
+    const card = text(sessionHistoryCard('示例项目', 'thread-1', {
+      activities: [{ kind: '用户', text: '请继续修复' }, { kind: '助手', text: '已完成第一步' }],
+      nextOffset: 10,
+      total: 22,
+    }, 0));
+    expect(card).toContain('历史上下文');
+    expect(card).toContain('Codex 已保留完整上下文');
+    expect(card).toContain('请继续修复');
+    expect(card).toContain('加载更早记录');
+    expect(card).toContain('thread-1 10');
+    expect(text(sessionHistoryCard('示例项目', 'thread-empty', { activities: [], total: 0 }, 0)))
+      .toContain('暂无可展示的文本历史');
   });
 
   it('keeps task cards concise while exposing acceptance evidence', () => {

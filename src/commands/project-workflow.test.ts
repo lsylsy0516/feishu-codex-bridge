@@ -328,9 +328,12 @@ describe('Codex project command workflow', () => {
     );
   });
 
-  it('offers to reopen a session whose previous Feishu topic is still locally bound', async () => {
-    const send = vi.fn().mockResolvedValue({ messageId: 'feedback' });
+  it('reopens a session directly when its previous Feishu topic is still locally bound', async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ messageId: 'root-reopened-from-list' })
+      .mockResolvedValue({ messageId: 'history-card' });
     const updateCard = vi.fn().mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({ data: { items: [{ thread_id: 'topic-reopened-from-list' }] } });
     const bindings = new JsonProjectBindingStore(join(await mkdtemp(join(tmpdir(), 'feishu-command-test-')), 'bindings.json'));
     bindings.registerProjects([project]);
     await bindings.bindProject(project.projectKey, 'chat-project');
@@ -338,7 +341,11 @@ describe('Codex project command workflow', () => {
       chatId: 'chat-project', topicId: 'topic-old', projectKey: project.projectKey,
       codexThreadId: 'thread-restored', createdBy: 'user-1', updatedAt: 1,
     });
-    const ctx = context({ send, updateCard }, bindings);
+    const readSessionHistory = vi.fn().mockResolvedValue({
+      activities: [{ kind: '用户', text: '旧问题' }, { kind: '助手', text: '旧回答' }],
+      total: 2,
+    });
+    const ctx = context({ send, updateCard, rawClient: { im: { v1: { message: { get } } } } }, bindings);
     ctx.msg.chatId = 'chat-project';
     ctx.msg.chatType = 'group';
     ctx.fromCardAction = true;
@@ -347,12 +354,18 @@ describe('Codex project command workflow', () => {
       ...ctx.agent,
       createSession: vi.fn(),
       listSessions,
+      readSessionHistory,
     };
 
     await runCommandHandler('session', 'open thread-restored', ctx);
 
     expect(listSessions).not.toHaveBeenCalled();
-    expect(JSON.stringify(updateCard.mock.calls)).toContain('session.reopen');
+    expect(bindings.findTopic('chat-project', 'topic-old')).toBeUndefined();
+    expect(bindings.findTopic('chat-project', 'topic-reopened-from-list')).toMatchObject({
+      codexThreadId: 'thread-restored',
+      projectKey: project.projectKey,
+    });
+    expect(readSessionHistory).toHaveBeenCalledWith('thread-restored', 0);
   });
 
   it('rebinds a restored session to a new topic and posts its history', async () => {
